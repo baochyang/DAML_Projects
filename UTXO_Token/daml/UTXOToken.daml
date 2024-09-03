@@ -1,0 +1,113 @@
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module UTXOToken where
+import Daml.Script
+
+type IouCid = ContractId Token
+
+template Token
+  with
+    issuer : Party
+    owner : Party
+    currency : Text
+    amount : Decimal
+    observers : [Party]
+  where
+    ensure amount > 0.0
+
+    signatory issuer, owner
+    observer observers
+
+    choice Iou_Transfer : ContractId IouTransfer
+      with
+        newOwner : Party
+      controller owner
+      do create IouTransfer with iou = this; newOwner
+
+    
+    choice Iou_Split : (IouCid, IouCid)
+        with
+        splitAmount: Decimal
+      controller owner
+      do
+        let restAmount = amount - splitAmount
+        splitCid <- create this with amount = splitAmount
+        restCid <- create this with amount = restAmount
+        return (splitCid, restCid)
+
+    choice Iou_Merge : IouCid
+      with
+        otherCid: IouCid
+      controller owner
+      do
+        otherIou <- fetch otherCid
+        -- Check the two IOU's are compatible
+        assert (
+          currency == otherIou.currency &&
+          owner == otherIou.owner &&
+          issuer == otherIou.issuer
+          )
+        -- Retire the old Token
+        archive otherCid
+        -- Return the merged Token
+        create this with amount = amount + otherIou.amount
+
+
+template IouTransfer
+  with
+    iou : Token
+    newOwner : Party
+  where
+    signatory iou.issuer, iou.owner
+    observer newOwner
+
+    choice IouTransfer_Cancel : IouCid
+      controller iou.owner
+      do create iou
+
+    choice IouTransfer_Reject : IouCid
+      controller newOwner
+      do create iou
+
+    choice IouTransfer_Accept : IouCid
+      controller newOwner
+      do
+        create iou with
+          owner = newOwner
+          observers = []
+
+
+test_setup = do
+  bank <- allocateParty "Bank"
+  alice <- allocateParty "Alice"
+  bob <- allocateParty "Bob"
+  
+  let
+    issuer = bank
+    currency = "USD"
+
+  iouMintCid <- submit bank do
+    createCmd Token with
+        issuer
+        owner = issuer
+        currency
+        amount = 100.0
+        observers = []
+
+  iouTransferAliceCid <- submit bank do
+    exerciseCmd iouMintCid Iou_Transfer 
+      with
+        newOwner = alice
+
+  iouAcceptAliceCid <- submit alice do
+    exerciseCmd iouTransferAliceCid IouTransfer_Accept
+
+  iouTransferBobCid <- submit alice do
+    exerciseCmd iouAcceptAliceCid Iou_Transfer 
+      with
+        newOwner = bob
+
+  submit bob do
+    exerciseCmd iouTransferBobCid IouTransfer_Accept
+      
